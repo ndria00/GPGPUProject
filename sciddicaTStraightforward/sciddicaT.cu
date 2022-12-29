@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <iostream>
 #include "util.hpp"
 
 // ----------------------------------------------------------------------------
@@ -98,88 +99,107 @@ double* addLayer2D(int rows, int columns){
 // ----------------------------------------------------------------------------
 // init kernel, called once before the simulation loop
 // ----------------------------------------------------------------------------
-void sciddicaTSimulationInit(int i, int j, int r, int c, double* Sz, double* Sh){
-    double z, h;
-    h = GET(Sh, c, i, j);
+//not so useful in terms of performances because it is called just once in the initialization phase
+__global__  void sciddicaTSimulationInit(int r, int c, double* Sz, double* Sh){
+    int i = blockDim.y * blockIdx.y + threadIdx.y;
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i >= 0 && j >= 0 && i < r && j < c){
+        double z, h;
+        h = GET(Sh, c, i, j);
 
-    if (h > 0.0){
-        z = GET(Sz, c, i, j);
-        SET(Sz, c, i, j, z - h);
+        if (h > 0.0){
+            z = GET(Sz, c, i, j);
+            SET(Sz, c, i, j, z - h);
+        }
     }
 }
 
 // ----------------------------------------------------------------------------
 // computing kernels, aka elementary processes in the XCA terminology
 // ----------------------------------------------------------------------------
-void sciddicaTResetFlows(int i, int j, int r, int c, double nodata, double* Sf){
-    BUF_SET(Sf, r, c, 0, i, j, 0.0);
-    BUF_SET(Sf, r, c, 1, i, j, 0.0);
-    BUF_SET(Sf, r, c, 2, i, j, 0.0);
-    BUF_SET(Sf, r, c, 3, i, j, 0.0);
+__global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
+    int i = blockDim.y * blockIdx.y + threadIdx.y;
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i > 0 && j > 0 && i < r-1 && j < c-1){
+        int t = i*c + j;
+        //printf("Hey %d, %d for: blockidx.x = %d, blockidx.y = %d and threadidx.x = %d and threadidx.y = %d, index in Sf %d\n", i, j, blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, t);
+        //printf("index in Sf %d\n", t);
+        BUF_SET(Sf, r, c, 0, i, j, 0.0);
+        BUF_SET(Sf, r, c, 1, i, j, 0.0);
+        BUF_SET(Sf, r, c, 2, i, j, 0.0);
+        BUF_SET(Sf, r, c, 3, i, j, 0.0);
+    }
 }
 
-void sciddicaTFlowsComputation(int i, int j, int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
-    bool eliminated_cells[5] = {false, false, false, false, false};
-    bool again;
-    int cells_count;
-    double average;
-    double m;
-    double u[5];
-    int n;
-    double z, h;
+__global__ void sciddicaTFlowsComputation(int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+    int i = blockDim.y * blockIdx.y + threadIdx.y;
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i > 0 && j > 0 && i < r-1 && j < c-1){
+        bool eliminated_cells[5] = {false, false, false, false, false};
+        bool again;
+        int cells_count;
+        double average;
+        double m;
+        double u[5];
+        int n;
+        double z, h;
+        m = GET(Sh, c, i, j) - p_epsilon;
+        u[0] = GET(Sz, c, i, j) + p_epsilon;
+        z = GET(Sz, c, i + Xi[1], j + Xj[1]);
+        h = GET(Sh, c, i + Xi[1], j + Xj[1]);
+        u[1] = z + h;                                         
+        z = GET(Sz, c, i + Xi[2], j + Xj[2]);
+        h = GET(Sh, c, i + Xi[2], j + Xj[2]);
+        u[2] = z + h;                                         
+        z = GET(Sz, c, i + Xi[3], j + Xj[3]);
+        h = GET(Sh, c, i + Xi[3], j + Xj[3]);
+        u[3] = z + h;                                         
+        z = GET(Sz, c, i + Xi[4], j + Xj[4]);
+        h = GET(Sh, c, i + Xi[4], j + Xj[4]);
+        u[4] = z + h;
 
-    m = GET(Sh, c, i, j) - p_epsilon;
-    u[0] = GET(Sz, c, i, j) + p_epsilon;
-    z = GET(Sz, c, i + Xi[1], j + Xj[1]);
-    h = GET(Sh, c, i + Xi[1], j + Xj[1]);
-    u[1] = z + h;                                         
-    z = GET(Sz, c, i + Xi[2], j + Xj[2]);
-    h = GET(Sh, c, i + Xi[2], j + Xj[2]);
-    u[2] = z + h;                                         
-    z = GET(Sz, c, i + Xi[3], j + Xj[3]);
-    h = GET(Sh, c, i + Xi[3], j + Xj[3]);
-    u[3] = z + h;                                         
-    z = GET(Sz, c, i + Xi[4], j + Xj[4]);
-    h = GET(Sh, c, i + Xi[4], j + Xj[4]);
-    u[4] = z + h;
+        do{
+            again = false;
+            average = m;
+            cells_count = 0;
 
-    do{
-        again = false;
-        average = m;
-        cells_count = 0;
-
-        for (n = 0; n < 5; n++){
-            if (!eliminated_cells[n]){
-                average += u[n];
-                cells_count++;
+            for (n = 0; n < 5; n++){
+                if (!eliminated_cells[n]){
+                    average += u[n];
+                    cells_count++;
+                }
             }
-        }
 
-        if (cells_count != 0)
-            average /= cells_count;
+            if (cells_count != 0)
+                average /= cells_count;
 
-        for (n = 0; n < 5; n++)
-            if ((average <= u[n]) && (!eliminated_cells[n])){
-                eliminated_cells[n] = true;
-                again = true;
-            }
-    }while(again);
+            for (n = 0; n < 5; n++)
+                if ((average <= u[n]) && (!eliminated_cells[n])){
+                    eliminated_cells[n] = true;
+                    again = true;
+                }
+        }while(again);
 
-    if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
-    if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
-    if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
-    if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
+        if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
+        if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
+        if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
+        if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
+    }
 }
 
-void sciddicaTWidthUpdate(int i, int j, int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf){
-    double h_next;
-    h_next = GET(Sh, c, i, j);
-    h_next += BUF_GET(Sf, r, c, 3, i+Xi[1], j+Xj[1]) - BUF_GET(Sf, r, c, 0, i, j);
-    h_next += BUF_GET(Sf, r, c, 2, i+Xi[2], j+Xj[2]) - BUF_GET(Sf, r, c, 1, i, j);
-    h_next += BUF_GET(Sf, r, c, 1, i+Xi[3], j+Xj[3]) - BUF_GET(Sf, r, c, 2, i, j);
-    h_next += BUF_GET(Sf, r, c, 0, i+Xi[4], j+Xj[4]) - BUF_GET(Sf, r, c, 3, i, j);
+__global__ void sciddicaTWidthUpdate(int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf){
+    int i = blockDim.y * blockIdx.y + threadIdx.y;
+    int j = blockDim.x * blockIdx.x + threadIdx.x;
+    if(i > 0 && j > 0 && i < r-1 && j < c-1){
+        double h_next = 0;
+        h_next = GET(Sh, c, i, j);
+        h_next += BUF_GET(Sf, r, c, 3, i+Xi[1], j+Xj[1]) - BUF_GET(Sf, r, c, 0, i, j);
+        h_next += BUF_GET(Sf, r, c, 2, i+Xi[2], j+Xj[2]) - BUF_GET(Sf, r, c, 1, i, j);
+        h_next += BUF_GET(Sf, r, c, 1, i+Xi[3], j+Xj[3]) - BUF_GET(Sf, r, c, 2, i, j);
+        h_next += BUF_GET(Sf, r, c, 0, i+Xi[4], j+Xj[4]) - BUF_GET(Sf, r, c, 3, i, j);
 
-    SET(Sh, c, i, j, h_next);
+        SET(Sh, c, i, j, h_next);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -223,32 +243,53 @@ int main(int argc, char **argv){
 
     loadGrid2D(Sz, r, c, argv[DEM_PATH_ID]);   // Load Sz from file
     loadGrid2D(Sh, r, c, argv[SOURCE_PATH_ID]);// Load Sh from file
+    
+    //declaring datastructure that will be used on the device
+    double *d_Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
+    double *d_Sh;                    // Sh: substate (grid) containing the cells' flow thickness
+    double *d_Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
+    int *d_Xi;
+    int *d_Xj;
+    unsigned numberOfBytes = rows * cols * sizeof(double);
+    //std::cout <<"Size of buffers " << numberOfBytes << "computed as " <<rows <<"*" << cols << "*" <<sizeof(double) << std::endl; 
+    
+    cudaMalloc((void**) &d_Sz, numberOfBytes);
+    cudaMalloc((void**) &d_Sh, numberOfBytes);
+    cudaMalloc((void**) &d_Sf, numberOfBytes * ADJACENT_CELLS);
+    cudaMalloc((void**) &d_Xi, (ADJACENT_CELLS + 1) * sizeof(int));
+    cudaMalloc((void**) &d_Xj, (ADJACENT_CELLS + 1) * sizeof(int));
+
+    //std::cout <<"Size of Sf: " << numberOfBytes*ADJACENT_CELLS << std::endl;
+    //compute number of blocks given a fixed dimension for the block
+    dim3 blockDimension(32, 32);
+    dim3 numBlocks(ceil(float(cols) / 32.0), ceil(float(rows) / 32.0));
+    //copy data to the device
+    cudaMemcpy(d_Sz, Sz, numberOfBytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Sh, Sh, numberOfBytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Sf, Sf, numberOfBytes * ADJACENT_CELLS, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Xi, Xi, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Xj, Xj, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
     // Apply the init kernel (elementary process) to the whole domain grid (cellular space)
-    for (int i = i_start; i < i_end; i++)
-        for (int j = j_start; j < j_end; j++)
-            sciddicaTSimulationInit(i, j, r, c, Sz, Sh);
+    sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(r, c, d_Sz, d_Sh);
 
     util::Timer cl_timer;
+    //std::cout << "using " << numBlocks.x << " " << numBlocks.y << " blocks in kernel" << std::endl;
+    //std::cout << "rows: " << r << " cols: " << c << std::endl;
     // simulation loop
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain
-        for (int i = i_start; i < i_end; i++)
-            for (int j = j_start; j < j_end; j++)
-                sciddicaTResetFlows(i, j, r, c, nodata, Sf);
-
+        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sf);
         // Apply the FlowComputation kernel to the whole domain
-        for (int i = i_start; i < i_end; i++){
-            for (int j = j_start; j < j_end; j++){
-                sciddicaTFlowsComputation(i, j, r, c, nodata, Xi, Xj, Sz, Sh, Sf, p_r, p_epsilon);
-            }
-        }
-
+        sciddicaTFlowsComputation<<<numBlocks, blockDimension>>>(r, c, nodata, d_Xi, d_Xj, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
         // Apply the WidthUpdate mass balance kernel to the whole domain
-        for (int i = i_start; i < i_end; i++)
-            for (int j = j_start; j < j_end; j++)
-                sciddicaTWidthUpdate(i, j, r, c, nodata, Xi, Xj, Sz, Sh, Sf);
+        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, nodata, d_Xi, d_Xj, d_Sz, d_Sh, d_Sf);
+
     }
+    //copy data back to the host
+    cudaMemcpy(Sz, d_Sz, numberOfBytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(Sh, d_Sh, numberOfBytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(Sf, d_Sf, numberOfBytes * ADJACENT_CELLS, cudaMemcpyDeviceToHost);
     double cl_time = static_cast<double>(cl_timer.getTimeMilliseconds()) / 1000.0;
     printf("Elapsed time: %lf [s]\n", cl_time);
 
@@ -258,6 +299,11 @@ int main(int argc, char **argv){
     delete[] Sz;
     delete[] Sh;
     delete[] Sf;
-
+    //deleting memory on GPU
+    cudaFree(d_Sz);
+    cudaFree(d_Sh);
+    cudaFree(d_Sf);
+    cudaFree(d_Xi);
+    cudaFree(d_Xj);
     return 0;
 }
