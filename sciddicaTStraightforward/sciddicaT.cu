@@ -122,8 +122,6 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
     int j = blockDim.x * blockIdx.x + threadIdx.x;
     if(i > 0 && j > 0 && i < r-1 && j < c-1){
         int t = i*c + j;
-        //printf("Hey %d, %d for: blockidx.x = %d, blockidx.y = %d and threadidx.x = %d and threadidx.y = %d, index in Sf %d\n", i, j, blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, t);
-        //printf("index in Sf %d\n", t);
         BUF_SET(Sf, r, c, 0, i, j, 0.0);
         BUF_SET(Sf, r, c, 1, i, j, 0.0);
         BUF_SET(Sf, r, c, 2, i, j, 0.0);
@@ -251,7 +249,6 @@ int main(int argc, char **argv){
     int *d_Xi;
     int *d_Xj;
     unsigned numberOfBytes = rows * cols * sizeof(double);
-    //std::cout <<"Size of buffers " << numberOfBytes << "computed as " <<rows <<"*" << cols << "*" <<sizeof(double) << std::endl; 
     
     cudaMalloc((void**) &d_Sz, numberOfBytes);
     cudaMalloc((void**) &d_Sh, numberOfBytes);
@@ -259,7 +256,6 @@ int main(int argc, char **argv){
     cudaMalloc((void**) &d_Xi, (ADJACENT_CELLS + 1) * sizeof(int));
     cudaMalloc((void**) &d_Xj, (ADJACENT_CELLS + 1) * sizeof(int));
 
-    //std::cout <<"Size of Sf: " << numberOfBytes*ADJACENT_CELLS << std::endl;
     //compute number of blocks given a fixed dimension for the block
     dim3 blockDimension(32, 32);
     dim3 numBlocks(ceil(float(cols) / 32.0), ceil(float(rows) / 32.0));
@@ -274,8 +270,6 @@ int main(int argc, char **argv){
     sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(r, c, d_Sz, d_Sh);
 
     util::Timer cl_timer;
-    //std::cout << "using " << numBlocks.x << " " << numBlocks.y << " blocks in kernel" << std::endl;
-    //std::cout << "rows: " << r << " cols: " << c << std::endl;
     // simulation loop
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain

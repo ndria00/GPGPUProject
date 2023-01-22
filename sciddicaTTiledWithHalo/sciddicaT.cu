@@ -129,8 +129,6 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
     int j = blockDim.x * blockIdx.x + threadIdx.x;
     if(i > 0 && j > 0 && i < r-1 && j < c-1){
         int t = i*c + j;
-        //printf("Hey %d, %d for: blockidx.x = %d, blockidx.y = %d and threadidx.x = %d and threadidx.y = %d, index in Sf %d\n", i, j, blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, t);
-        //printf("index in Sf %d\n", t);
         BUF_SET(Sf, r, c, 0, i, j, 0.0);
         BUF_SET(Sf, r, c, 1, i, j, 0.0);
         BUF_SET(Sf, r, c, 2, i, j, 0.0);
@@ -146,34 +144,17 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
     //declaring buffers in shared memory 
     __shared__ double Sz_shared[dim_buffers * dim_buffers];
     __shared__ double Sh_shared[dim_buffers * dim_buffers];
-    //__shared__ double Sf_shared[ADJACENT_CELLS * dim_buffers * dim_buffers];
     //determining the indexes of the element that each thread has to load in shared memory
     int i_halo = i - NEIGHBOURHOOD_WIDTH/2;
     int j_halo = j - NEIGHBOURHOOD_WIDTH/2;
     if(i_halo >= 0 && i_halo < r && j_halo >= 0 && j_halo < c){
         Sz_shared[threadIdx.y * dim_buffers + threadIdx.x] = Sz[i_halo * c + j_halo];
         Sh_shared[threadIdx.y * dim_buffers + threadIdx.x] = Sh[i_halo * c + j_halo];
-
-        //printf("set sh to %f and sz to %f", Sh_shared[threadIdx.y * dim_buffers + threadIdx.x], Sz_shared[threadIdx.y * dim_buffers + threadIdx.x]);
-        // Sf_shared[threadIdx.y * dim_buffers + threadIdx.x] =  BUF_GET(Sf, r, c, 0, i_halo, j_halo); //Sf[i_halo * c + j_halo];
-        // Sf_shared[1 * dim_buffers * dim_buffers + threadIdx.y * dim_buffers + threadIdx.x] = BUF_GET(Sf, r, c, 1, i_halo, j_halo); //Sf[1 * r * c + i_halo * c + j_halo];
-        // Sf_shared[2 * dim_buffers * dim_buffers + threadIdx.y * dim_buffers + threadIdx.x] = BUF_GET(Sf, r, c, 2, i_halo, j_halo);// Sf[2 * r * c + i_halo * c + j_halo];
-        // Sf_shared[3 * dim_buffers * dim_buffers + threadIdx.y * dim_buffers + threadIdx.x] = BUF_GET(Sf, r, c, 3, i_halo, j_halo); //Sf[3 * r * c + i_halo * c + j_halo];
-    
     }
     else{
         //ghost cells are not needed since boundaries are not computed
     }
     __syncthreads();
-    // if(blockIdx.x == 27 && blockIdx.y == 4 && threadIdx.x == 0 && threadIdx.y == 0){
-    //     for(unsigned t1 = 0; t1 < r ; ++t1){
-    //         for(unsigned t2 = 0; t2 < c ; ++t2){
-    //             printf("%f ", Sh[t1*c + t2]);
-    //         }
-    //         printf("\n");
-    //     }
-
-    // }
 
     if(i > 0 && i < r -1 && j > 0 && j < c -1 &&  threadIdx.y < TILE_SIZE && threadIdx.x < TILE_SIZE){
         bool eliminated_cells[5] = {false, false, false, false, false};
@@ -199,9 +180,6 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
         h = GET(Sh_shared, dim_buffers, 1 + threadIdx.y + Xi[4], 1 + threadIdx.x + Xj[4]);
         u[4] = z + h;
 
-        // for(int l = 0; l<5; ++l){
-        //         printf("Found %f at indexes %d %d\n", m, i, j);
-        // }
         do{
             again = false;
             average = m;
@@ -219,20 +197,13 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
 
             for (n = 0; n < 5; n++)
                 if ((average <= u[n]) && (!eliminated_cells[n])){
-                    //printf("average %f, u %f\n", average, u[n]);
                     eliminated_cells[n] = true;
                     again = true;
                 }
         }while(again);
 
-        if (!eliminated_cells[1]){
-            //printf("Setting some Sf\n");
-            BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
-        }
-        if (!eliminated_cells[2]){
-            //printf("Setting some Sf\n");
-            BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
-        }
+        if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
+        if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
         if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
         if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
     }
@@ -300,15 +271,11 @@ int main(int argc, char **argv){
     int *d_Xi;
     int *d_Xj;
     unsigned numberOfBytes = rows * cols * sizeof(double);
-    //std::cout <<"Size of buffers " << numberOfBytes << "computed as " <<rows <<"*" << cols << "*" <<sizeof(double) << std::endl; 
     
     cudaMalloc((void**) &d_Sz, numberOfBytes);
     cudaMalloc((void**) &d_Sh, numberOfBytes);
     cudaMalloc((void**) &d_Sf, numberOfBytes * ADJACENT_CELLS);
-    //cudaMalloc((void**) &d_Xi, (ADJACENT_CELLS + 1) * sizeof(int));
-    //cudaMalloc((void**) &d_Xj, (ADJACENT_CELLS + 1) * sizeof(int));
 
-    //std::cout <<"Size of Sf: " << numberOfBytes*ADJACENT_CELLS << std::endl;
     //compute number of blocks given a fixed dimension for the block
     dim3 blockDimensionFlowsComputation(TILE_SIZE+NEIGHBOURHOOD_WIDTH -1, TILE_SIZE + NEIGHBOURHOOD_WIDTH -1);
     dim3 numBlocksFlowsComputation(ceil(float(cols) / float(TILE_SIZE)), ceil(float(rows) / float(TILE_SIZE)));
@@ -318,40 +285,25 @@ int main(int argc, char **argv){
     cudaMemcpy(d_Sz, Sz, numberOfBytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Sh, Sh, numberOfBytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Sf, Sf, numberOfBytes * ADJACENT_CELLS, cudaMemcpyHostToDevice);
-    //cudaMemcpy(d_Xi, Xi, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
-    //cudaMemcpy(d_Xj, Xj, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
     // Apply the init kernel (elementary process) to the whole domain grid (cellular space)
     sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(r, c, d_Sz, d_Sh);
     util::Timer cl_timer;
-    //std::cout << "using " << numBlocksFlowsComputation.x << " " << numBlocksFlowsComputation.y << " blocks in kernel" << std::endl;
-    //std::cout << "rows: " << r << " cols: " << c << std::endl;
     // simulation loop
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain
         int error;
         sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sf);
-        //error = cudaGetLastError();
-        //std::cout << "Error: " << error << std::endl;
         // Apply the FlowComputation kernel to the whole domain
         sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation>>>(r, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
-        //error = cudaGetLastError();
-        //std::cout << "Error: " << error << std::endl;
         // Apply the WidthUpdate mass balance kernel to the whole domain
         sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sz, d_Sh, d_Sf);
-        //error = cudaGetLastError();
-        //std::cout << "Error: " << error << std::endl;
     }
     //copy data back to the host
     cudaMemcpy(Sz, d_Sz, numberOfBytes, cudaMemcpyDeviceToHost);
     cudaMemcpy(Sf, d_Sf, numberOfBytes * ADJACENT_CELLS, cudaMemcpyDeviceToHost);
     cudaMemcpy(Sh, d_Sh, numberOfBytes, cudaMemcpyDeviceToHost);
-    // for(unsigned i = 0; i < r; ++i){
-    //     for(unsigned j = 0; j < c; ++j){
-    //         std::cout<< Sh[i*r+j]<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    // }
+    
     double cl_time = static_cast<double>(cl_timer.getTimeMilliseconds()) / 1000.0;
     printf("Elapsed time: %lf [s]\n", cl_time);
 
