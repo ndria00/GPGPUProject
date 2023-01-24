@@ -15,6 +15,7 @@
 #define STEPS_ID 5
 #define BLOCK_X 6
 #define BLOCK_Y 7
+#define STRIDE_IDX 8
 // ----------------------------------------------------------------------------
 // Simulation parameters
 // ----------------------------------------------------------------------------
@@ -30,6 +31,10 @@
 #define GET(M, columns, i, j) (M[(((i) * (columns)) + (j))])
 #define BUF_SET(M, rows, columns, n, i, j, value) ( (M)[( ((n)*(rows)*(columns)) + ((i)*(columns)) + (j) )] = (value) )
 #define BUF_GET(M, rows, columns, n, i, j) ( M[( ((n)*(rows)*(columns)) + ((i)*(columns)) + (j) )] )
+
+// declaring neighbourhood in constant memory in order to provide faster memory access
+__constant__ int Xi[] = {0, -1, 0, 0, 1}; // Xj: von Neuman neighborhood row coordinates (see below)
+__constant__ int Xj[] = {0, 0, -1, 1, 0}; // Xj: von Neuman neighborhood col coordinates (see below)
 
 // ----------------------------------------------------------------------------
 // I/O functions
@@ -102,102 +107,130 @@ double* addLayer2D(int rows, int columns){
 // init kernel, called once before the simulation loop
 // ----------------------------------------------------------------------------
 //not so useful in terms of performances because it is called just once in the initialization phase
-__global__  void sciddicaTSimulationInit(int r, int c, double* Sz, double* Sh){
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    if(i >= 0 && j >= 0 && i < r && j < c){
-        double z, h;
-        h = GET(Sh, c, i, j);
+__global__  void sciddicaTSimulationInit(int r, int c, const int STRIDE, double* Sz, double* Sh){
+    int i = STRIDE * blockDim.y * blockIdx.y + threadIdx.y;
+    int j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
+    for(unsigned idx_x = 0; idx_x < STRIDE; ++idx_x){
+        for(unsigned idx_y = 0; idx_y < STRIDE; ++idx_y){
+            if(i >= 0 && j >= 0 && i < r && j < c){
+                double z, h;
+                h = GET(Sh, c, i, j);
 
-        if (h > 0.0){
-            z = GET(Sz, c, i, j);
-            SET(Sz, c, i, j, z - h);
+                if (h > 0.0){
+                    z = GET(Sz, c, i, j);
+                    SET(Sz, c, i, j, z - h);
+                }
+            }
+            j +=blockDim.x;
         }
+        i += blockDim.y;
+        j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
     }
 }
 
 // ----------------------------------------------------------------------------
 // computing kernels, aka elementary processes in the XCA terminology
 // ----------------------------------------------------------------------------
-__global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    if(i > 0 && j > 0 && i < r-1 && j < c-1){
-        BUF_SET(Sf, r, c, 0, i, j, 0.0);
-        BUF_SET(Sf, r, c, 1, i, j, 0.0);
-        BUF_SET(Sf, r, c, 2, i, j, 0.0);
-        BUF_SET(Sf, r, c, 3, i, j, 0.0);
-    }
-}
-
-__global__ void sciddicaTFlowsComputation(int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    if(i > 0 && j > 0 && i < r-1 && j < c-1){
-        bool eliminated_cells[5] = {false, false, false, false, false};
-        bool again;
-        int cells_count;
-        double average;
-        double m;
-        double u[5];
-        int n;
-        double z, h;
-        m = GET(Sh, c, i, j) - p_epsilon;
-        u[0] = GET(Sz, c, i, j) + p_epsilon;
-        z = GET(Sz, c, i + Xi[1], j + Xj[1]);
-        h = GET(Sh, c, i + Xi[1], j + Xj[1]);
-        u[1] = z + h;                                         
-        z = GET(Sz, c, i + Xi[2], j + Xj[2]);
-        h = GET(Sh, c, i + Xi[2], j + Xj[2]);
-        u[2] = z + h;                                         
-        z = GET(Sz, c, i + Xi[3], j + Xj[3]);
-        h = GET(Sh, c, i + Xi[3], j + Xj[3]);
-        u[3] = z + h;                                         
-        z = GET(Sz, c, i + Xi[4], j + Xj[4]);
-        h = GET(Sh, c, i + Xi[4], j + Xj[4]);
-        u[4] = z + h;
-
-        do{
-            again = false;
-            average = m;
-            cells_count = 0;
-
-            for (n = 0; n < 5; n++){
-                if (!eliminated_cells[n]){
-                    average += u[n];
-                    cells_count++;
-                }
+__global__ void sciddicaTResetFlows(int r, int c, const int STRIDE, double nodata, double* Sf){
+    int i = STRIDE * blockDim.y * blockIdx.y + threadIdx.y;
+    int j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
+    for(unsigned idx_x = 0; idx_x < STRIDE; ++idx_x){
+        for(unsigned idx_y = 0; idx_y < STRIDE; ++idx_y){
+            if(i > 0 && j > 0 && i < r-1 && j < c-1){
+                BUF_SET(Sf, r, c, 0, i, j, 0.0);
+                BUF_SET(Sf, r, c, 1, i, j, 0.0);
+                BUF_SET(Sf, r, c, 2, i, j, 0.0);
+                BUF_SET(Sf, r, c, 3, i, j, 0.0);
             }
-
-            if (cells_count != 0)
-                average /= cells_count;
-
-            for (n = 0; n < 5; n++)
-                if ((average <= u[n]) && (!eliminated_cells[n])){
-                    eliminated_cells[n] = true;
-                    again = true;
-                }
-        }while(again);
-
-        if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
-        if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
-        if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
-        if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
+            j +=blockDim.x;
+        }
+        i += blockDim.y;
+        j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
     }
 }
 
-__global__ void sciddicaTWidthUpdate(int r, int c, double nodata, int* Xi, int* Xj, double *Sz, double *Sh, double *Sf){
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    if(i > 0 && j > 0 && i < r-1 && j < c-1){
-        double h_next = 0;
-        h_next = GET(Sh, c, i, j);
-        h_next += BUF_GET(Sf, r, c, 3, i+Xi[1], j+Xj[1]) - BUF_GET(Sf, r, c, 0, i, j);
-        h_next += BUF_GET(Sf, r, c, 2, i+Xi[2], j+Xj[2]) - BUF_GET(Sf, r, c, 1, i, j);
-        h_next += BUF_GET(Sf, r, c, 1, i+Xi[3], j+Xj[3]) - BUF_GET(Sf, r, c, 2, i, j);
-        h_next += BUF_GET(Sf, r, c, 0, i+Xi[4], j+Xj[4]) - BUF_GET(Sf, r, c, 3, i, j);
+__global__ void sciddicaTFlowsComputation(int r, int c, const int STRIDE, double nodata, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+    int i = STRIDE * blockDim.y * blockIdx.y + threadIdx.y;
+    int j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
+    for(unsigned idx_x = 0; idx_x < STRIDE; ++idx_x){
+        for(unsigned idx_y = 0; idx_y < STRIDE; ++idx_y){
+            if(i > 0 && j > 0 && i < r-1 && j < c-1){
+                bool eliminated_cells[5] = {false, false, false, false, false};
+                bool again;
+                int cells_count;
+                double average;
+                double m;
+                double u[5];
+                int n;
+                double z, h;
+                m = GET(Sh, c, i, j) - p_epsilon;
+                u[0] = GET(Sz, c, i, j) + p_epsilon;
+                z = GET(Sz, c, i + Xi[1], j + Xj[1]);
+                h = GET(Sh, c, i + Xi[1], j + Xj[1]);
+                u[1] = z + h;                                         
+                z = GET(Sz, c, i + Xi[2], j + Xj[2]);
+                h = GET(Sh, c, i + Xi[2], j + Xj[2]);
+                u[2] = z + h;                                         
+                z = GET(Sz, c, i + Xi[3], j + Xj[3]);
+                h = GET(Sh, c, i + Xi[3], j + Xj[3]);
+                u[3] = z + h;                                         
+                z = GET(Sz, c, i + Xi[4], j + Xj[4]);
+                h = GET(Sh, c, i + Xi[4], j + Xj[4]);
+                u[4] = z + h;
 
-        SET(Sh, c, i, j, h_next);
+                do{
+                    again = false;
+                    average = m;
+                    cells_count = 0;
+
+                    for (n = 0; n < 5; n++){
+                        if (!eliminated_cells[n]){
+                            average += u[n];
+                            cells_count++;
+                        }
+                    }
+
+                    if (cells_count != 0)
+                        average /= cells_count;
+
+                    for (n = 0; n < 5; n++)
+                        if ((average <= u[n]) && (!eliminated_cells[n])){
+                            eliminated_cells[n] = true;
+                            again = true;
+                        }
+                }while(again);
+
+                if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
+                if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
+                if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
+                if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
+            }
+            j +=blockDim.x;
+        }
+        i+= blockDim.y;
+        j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
+    }
+}
+
+__global__ void sciddicaTWidthUpdate(int r, int c, const int STRIDE, double nodata, double *Sz, double *Sh, double *Sf){
+    int i = STRIDE * blockDim.y * blockIdx.y + threadIdx.y;
+    int j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
+    for(unsigned idx_x = 0; idx_x < STRIDE; ++idx_x){
+        for(unsigned idx_y = 0; idx_y < STRIDE; ++idx_y){
+            if(i > 0 && j > 0 && i < r-1 && j < c-1){
+                double h_next = 0;
+                h_next = GET(Sh, c, i, j);
+                h_next += BUF_GET(Sf, r, c, 3, i+Xi[1], j+Xj[1]) - BUF_GET(Sf, r, c, 0, i, j);
+                h_next += BUF_GET(Sf, r, c, 2, i+Xi[2], j+Xj[2]) - BUF_GET(Sf, r, c, 1, i, j);
+                h_next += BUF_GET(Sf, r, c, 1, i+Xi[3], j+Xj[3]) - BUF_GET(Sf, r, c, 2, i, j);
+                h_next += BUF_GET(Sf, r, c, 0, i+Xi[4], j+Xj[4]) - BUF_GET(Sf, r, c, 3, i, j);
+
+                SET(Sh, c, i, j, h_next);
+            }
+            j +=blockDim.x;
+        }
+        i+= blockDim.y;
+        j = STRIDE * blockDim.x * blockIdx.x + threadIdx.x;
     }
 }
 
@@ -214,8 +247,6 @@ int main(int argc, char **argv){
     double *Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *Sh;                    // Sh: substate (grid) containing the cells' flow thickness
     double *Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
-    int Xi[] = {0, -1,  0,  0,  1};// Xj: von Neuman neighborhood row coordinates (see below)
-    int Xj[] = {0,  0, -1,  1,  0};// Xj: von Neuman neighborhood col coordinates (see below)
     double p_r = P_R;              // p_r: minimization algorithm outflows dumping factor
     double p_epsilon = P_EPSILON;  // p_epsilon: frictional parameter threshold
     int steps = atoi(argv[STEPS_ID]); //steps: simulation steps
@@ -245,41 +276,34 @@ int main(int argc, char **argv){
     double *d_Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *d_Sh;                    // Sh: substate (grid) containing the cells' flow thickness
     double *d_Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
-    int *d_Xi;
-    int *d_Xj;
     unsigned numberOfBytes = rows * cols * sizeof(double);
     
     cudaMalloc((void**) &d_Sz, numberOfBytes);
     cudaMalloc((void**) &d_Sh, numberOfBytes);
     cudaMalloc((void**) &d_Sf, numberOfBytes * ADJACENT_CELLS);
-    cudaMalloc((void**) &d_Xi, (ADJACENT_CELLS + 1) * sizeof(int));
-    cudaMalloc((void**) &d_Xj, (ADJACENT_CELLS + 1) * sizeof(int));
 
     //compute number of blocks given a fixed dimension for the block
     int block_x = atoi(argv[BLOCK_X]), block_y =atoi(argv[BLOCK_Y]);
+    const int STRIDE = atoi(argv[STRIDE_IDX]);
     dim3 blockDimension(block_x, block_y);
-    dim3 numBlocks(ceil(float(cols) / float(block_x)), ceil(float(rows) / float(block_y)));
-    printf("running with %d, %d blocks\n", numBlocks.x, numBlocks.y);
+    dim3 numBlocks(ceil(float(cols) / float(block_x) / float(STRIDE)), ceil(float(rows) / float(block_y) / float(STRIDE)));
     //copy data to the device
     cudaMemcpy(d_Sz, Sz, numberOfBytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Sh, Sh, numberOfBytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Sf, Sf, numberOfBytes * ADJACENT_CELLS, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Xi, Xi, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Xj, Xj, (ADJACENT_CELLS + 1) * sizeof(int), cudaMemcpyHostToDevice);
 
     // Apply the init kernel (elementary process) to the whole domain grid (cellular space)
-    sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(r, c, d_Sz, d_Sh);
+    sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(r, c, STRIDE, d_Sz, d_Sh);
 
     util::Timer cl_timer;
     // simulation loop
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain
-        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sf);
+        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, STRIDE, nodata, d_Sf);
         // Apply the FlowComputation kernel to the whole domain
-        sciddicaTFlowsComputation<<<numBlocks, blockDimension>>>(r, c, nodata, d_Xi, d_Xj, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
+        sciddicaTFlowsComputation<<<numBlocks, blockDimension>>>(r, c, STRIDE, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
         // Apply the WidthUpdate mass balance kernel to the whole domain
-        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, nodata, d_Xi, d_Xj, d_Sz, d_Sh, d_Sf);
-
+        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, STRIDE, nodata, d_Sz, d_Sh, d_Sf);
     }
     //copy data back to the host
     cudaMemcpy(Sz, d_Sz, numberOfBytes, cudaMemcpyDeviceToHost);
@@ -298,7 +322,5 @@ int main(int argc, char **argv){
     cudaFree(d_Sz);
     cudaFree(d_Sh);
     cudaFree(d_Sf);
-    cudaFree(d_Xi);
-    cudaFree(d_Xj);
     return 0;
 }

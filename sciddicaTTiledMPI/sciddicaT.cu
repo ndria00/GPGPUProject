@@ -10,6 +10,7 @@
 // Simulation parameters
 // ----------------------------------------------------------------------------
 #define NEIGHBOURHOOD_WIDTH 3
+#define TILE_SIZE 8
 // ----------------------------------------------------------------------------
 // Read/Write access macros linearizing single/multy layer buffer 2D indices
 // ----------------------------------------------------------------------------
@@ -150,7 +151,7 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double *Sf, int
     }
 }
 
-__global__ void sciddicaTFlowsComputation(int r, int c, int TILE_SIZE, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+__global__ void sciddicaTFlowsComputation(int r, int c, double&, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
     //determining row and col indexes that each thread has to compute
     int i = TILE_SIZE * blockIdx.y + threadIdx.y;
     int j = TILE_SIZE * blockIdx.x + threadIdx.x;
@@ -363,7 +364,6 @@ int main(int argc, char **argv){
     #define SOURCE_PATH_ID 3
     #define OUTPUT_PATH_ID 4
     #define STEPS_ID 5
-    #define TILE_SIZE_IDX 6
     // ----------------------------------------------------------------------------
     // Simulation parameters
     // ----------------------------------------------------------------------------
@@ -437,10 +437,8 @@ int main(int argc, char **argv){
     double *d_Sz; // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *d_Sh; // Sh: substate (grid) containing the cells' flow thickness
     double *d_Sf; // Sf: 4 substates containing the flows towards the 4 neighs
-    // int *d_Xi;
-    // int *d_Xj;
 
-    int cuda_error = cudaSetDevice(1);
+    int cuda_error = cudaSetDevice(pid);
     if(cuda_error != cudaSuccess){
         printf("%d\n", cuda_error);
         return 1;
@@ -470,18 +468,21 @@ int main(int argc, char **argv){
         cudaHostAlloc((void **)&d_Sf_bottom_halo, number_of_halo_bytes, cudaHostAllocDefault);
     }
     // compute number of blocks given a fixed dimension for the block
-    int TILE_SIZE = atoi(argv[TILE_SIZE_IDX]);
-    dim3 blockDimension(32, 32);
-    dim3 numBlocks(ceil(float(cols) / 32.0), ceil((float(number_of_rows_to_compute)) / 32.0));
+    dim3 blockDimension(16, 16);
+    dim3 numBlocks(ceil(float(cols) / 16.0), ceil((float(number_of_rows_to_compute)) / 16.0));
 
-    dim3 blockDimensionHalo(32);
-    dim3 numBlocksHalo(ceil(float(cols) / 32.0));
+    dim3 blockDimensionHalo(256);
+    dim3 numBlocksHalo(ceil(float(cols) / 256.0));
 
     dim3 blockDimensionFlowsComputation(TILE_SIZE+NEIGHBOURHOOD_WIDTH -1, TILE_SIZE + NEIGHBOURHOOD_WIDTH -1);
     dim3 numBlocksFlowsComputation(ceil(float(cols) / float(TILE_SIZE)), ceil(float(number_of_rows_to_compute) / float(TILE_SIZE)));
     // each process here has already declared the data structures he needs and now
     // worker processed can receive their portion of data to compute and halos
     MPI_Status status;
+    //
+    cudaStream_t stream0, stream1;
+    cudaStreamCreate(&stream0);
+    cudaStreamCreate(&stream1);
     
     //send only chunks so that every process runs its init kernel
     if(pid == 0){
@@ -510,15 +511,15 @@ int main(int argc, char **argv){
     //this is all 0 in the first step
 
     // Apply the init kernel (elementary process) to the whole domain grid (cellular space)
-    sciddicaTSimulationInit<<<numBlocks, blockDimension>>>(number_of_rows_to_compute, c, d_Sz, d_Sh);
- 
+    sciddicaTSimulationInit<<<numBlocks, blockDimension, 0, stream0>>>(number_of_rows_to_compute, c, d_Sz, d_Sh);
+    cudaStreamSynchronize(stream0);
     util::Timer cl_timer;
 
 
     //  simulation loop
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain
-        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(number_of_rows_to_compute, c, nodata, d_Sf, pid, np);
+        sciddicaTResetFlows<<<numBlocks, blockDimension, 0, stream0>>>(number_of_rows_to_compute, c, nodata, d_Sf, pid, np);
         if(pid == 0){
             //send bottom halo
             MPI_Send(&d_Sh[chunk - cols], cols, MPI_DOUBLE, 1, 1, MPI_COMM_WORLD);
@@ -536,14 +537,15 @@ int main(int argc, char **argv){
             MPI_Send(d_Sh, cols, MPI_DOUBLE, pid -1, 7, MPI_COMM_WORLD);
             MPI_Send(d_Sz, cols, MPI_DOUBLE, pid -1, 8, MPI_COMM_WORLD);
         }
-        // Apply the FlowComputation kernel to the whole domain
-        sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
-
+        cudaStreamSynchronize(stream0);
         if(pid != 0)
-            sciddicaTFlowsComputationHalos<<<numBlocksHalo, blockDimensionHalo>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon, d_Sh_top_halo, d_Sz_top_halo, d_Sf_top_halo, true);
+            sciddicaTFlowsComputationHalos<<<numBlocksHalo, blockDimensionHalo, 0, stream1>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon, d_Sh_top_halo, d_Sz_top_halo, d_Sf_top_halo, true);
         if(pid != np -1)
-            sciddicaTFlowsComputationHalos<<<numBlocksHalo, blockDimensionHalo>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon, d_Sh_bottom_halo, d_Sz_bottom_halo, d_Sf_bottom_halo, false);  
+            sciddicaTFlowsComputationHalos<<<numBlocksHalo, blockDimensionHalo, 0, stream1>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon, d_Sh_bottom_halo, d_Sz_bottom_halo, d_Sf_bottom_halo, false);  
 
+        // Apply the FlowComputation kernel to the whole domain
+        sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation, 0, stream0>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
+        cudaStreamSynchronize(stream1);
         if(pid == 0){
             //send bottom halo
             MPI_Send(&d_Sf[4 * chunk - cols], cols, MPI_DOUBLE, 1, 6, MPI_COMM_WORLD);
@@ -557,13 +559,14 @@ int main(int argc, char **argv){
             MPI_Send(d_Sf, cols, MPI_DOUBLE, pid -1, 9, MPI_COMM_WORLD);
         }
         // Apply the WidthUpdate mass balance kernel to the whole domain
-        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf);
+        sciddicaTWidthUpdate<<<numBlocks, blockDimension, 0, stream0>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf);
         if(pid != 0){
-            sciddicaTWidthUpdateHalos<<<numBlocksHalo, blockDimensionHalo>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, d_Sf_top_halo, true);
+            sciddicaTWidthUpdateHalos<<<numBlocksHalo, blockDimensionHalo, 1, stream0>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, d_Sf_top_halo, true);
         }
         if(pid != np -1)
-            sciddicaTWidthUpdateHalos<<<numBlocksHalo, blockDimensionHalo>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, d_Sf_bottom_halo, false);
+            sciddicaTWidthUpdateHalos<<<numBlocksHalo, blockDimensionHalo, 1, stream0>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, d_Sf_bottom_halo, false);
         
+        cudaDeviceSynchronize();
         MPI_Barrier(MPI_COMM_WORLD);
     }
    

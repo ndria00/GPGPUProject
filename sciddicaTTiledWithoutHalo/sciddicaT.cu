@@ -9,7 +9,7 @@
 // Simulation parameters
 // ----------------------------------------------------------------------------
 #define NEIGHBOURHOOD_WIDTH 3
-
+#define TILE_SIZE 8
 // ----------------------------------------------------------------------------
 // Read/Write access macros linearizing single/multy layer buffer 2D indices
 // ----------------------------------------------------------------------------
@@ -26,7 +26,7 @@ __constant__ int Xj[] = {0,  0, -1,  1,  0};// Xj: von Neuman neighborhood col c
 // ----------------------------------------------------------------------------
 // I/O functions
 // ----------------------------------------------------------------------------
-void readHeaderInfo(char* path, int &nrows, int &ncols, /*double &xllcorner, double &yllcorner, double &cellsize,*/ double &nodata){
+void readHeaderInfo(const char* path, int &nrows, int &ncols, /*double &xllcorner, double &yllcorner, double &cellsize,*/ double &nodata){
     #define STRLEN 256
     FILE* f;
   
@@ -45,7 +45,7 @@ void readHeaderInfo(char* path, int &nrows, int &ncols, /*double &xllcorner, dou
     fscanf(f,"%s",&str); fscanf(f,"%s",&str); nodata = atof(str);     //NODATA_value 
 }
 
-bool loadGrid2D(double *M, int rows, int columns, char *path){
+bool loadGrid2D(double *M, int rows, int columns, const char *path){
     #define STRLEN 256
     FILE *f = fopen(path, "r");
 
@@ -66,7 +66,7 @@ bool loadGrid2D(double *M, int rows, int columns, char *path){
     return true;
 }
 
-bool saveGrid2Dr(double *M, int rows, int columns, char *path){
+bool saveGrid2Dr(double *M, int rows, int columns, const char *path){
     #define STRLEN 256
     FILE *f;
     f = fopen(path, "w");
@@ -118,7 +118,6 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
     int i = blockDim.y * blockIdx.y + threadIdx.y;
     int j = blockDim.x * blockIdx.x + threadIdx.x;
     if(i > 0 && j > 0 && i < r-1 && j < c-1){
-        int t = i*c + j;
         BUF_SET(Sf, r, c, 0, i, j, 0.0);
         BUF_SET(Sf, r, c, 1, i, j, 0.0);
         BUF_SET(Sf, r, c, 2, i, j, 0.0);
@@ -126,7 +125,7 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
     }
 }
 
-__global__ void sciddicaTFlowsComputation(int r, int c, int TILE_SIZE, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+__global__ void sciddicaTFlowsComputation(int r, int c, double& nodata, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
     //determining row and col indexes that each thread has to compute
     int i = TILE_SIZE * blockIdx.y + threadIdx.y;
     int j = TILE_SIZE * blockIdx.x + threadIdx.x;
@@ -134,9 +133,6 @@ __global__ void sciddicaTFlowsComputation(int r, int c, int TILE_SIZE, double *S
     //declaring buffers in shared memory 
     __shared__ double Sz_shared[dim_buffers * dim_buffers];
     __shared__ double Sh_shared[dim_buffers * dim_buffers];
-    //determining the indexes of the element that each thread has to load in shared memory
-    int i_halo = i - NEIGHBOURHOOD_WIDTH/2;
-    int j_halo = j - NEIGHBOURHOOD_WIDTH/2;
     if(i > 0 && i < r && j > 0 && j < c){
         Sz_shared[(threadIdx.y +1) * dim_buffers + threadIdx.x +1] = Sz[i * c + j];
         Sh_shared[(threadIdx.y +1) * dim_buffers + threadIdx.x +1] = Sh[i * c + j];
@@ -249,7 +245,7 @@ __global__ void sciddicaTWidthUpdate(int r, int c, double nodata, double *Sz, do
 // ----------------------------------------------------------------------------
 // Function main()
 // ----------------------------------------------------------------------------
-int main(int argc, char **argv){
+int main(const int argc, char* const*argv){
 
     // ----------------------------------------------------------------------------
     // I/O parameters used to index argv[]
@@ -259,7 +255,6 @@ int main(int argc, char **argv){
     #define SOURCE_PATH_ID 3
     #define OUTPUT_PATH_ID 4
     #define STEPS_ID 5
-    #define TILE_SIZE_IDX 6
     // ----------------------------------------------------------------------------
     // Simulation parameters
     // ----------------------------------------------------------------------------
@@ -274,8 +269,6 @@ int main(int argc, char **argv){
 
     int r = rows;                  // r: grid rows
     int c = cols;                  // c: grid columns
-    int i_start = 1, i_end = r-1;  // [i_start,i_end[: kernels application range along the rows
-    int j_start = 1, j_end = c-1;  // [i_start,i_end[: kernels application range along the rows
     double *Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *Sh;                    // Sh: substate (grid) containing the cells' flow thickness
     double *Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
@@ -308,8 +301,6 @@ int main(int argc, char **argv){
     double *d_Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *d_Sh;                    // Sh: substate (grid) containing the cells' flow thickness
     double *d_Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
-    int *d_Xi;
-    int *d_Xj;
     unsigned numberOfBytes = rows * cols * sizeof(double);
     
     cudaMalloc((void**) &d_Sz, numberOfBytes);
@@ -317,7 +308,6 @@ int main(int argc, char **argv){
     cudaMalloc((void**) &d_Sf, numberOfBytes * ADJACENT_CELLS);
 
     //compute number of blocks given a fixed dimension for the block
-    int TILE_SIZE = atoi(argv[TILE_SIZE_IDX]);
     dim3 blockDimensionFlowsComputation(TILE_SIZE, TILE_SIZE);
     dim3 numBlocksFlowsComputation(ceil(float(cols) / float(TILE_SIZE)), ceil(float(rows) / float(TILE_SIZE)));
     dim3 blockDimension(32, 32);
