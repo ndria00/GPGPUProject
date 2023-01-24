@@ -6,7 +6,10 @@
 #include <mpi.h>
 #include "util.hpp"
 
-
+// ----------------------------------------------------------------------------
+// Simulation parameters
+// ----------------------------------------------------------------------------
+#define NEIGHBOURHOOD_WIDTH 3
 // ----------------------------------------------------------------------------
 // Read/Write access macros linearizing single/multy layer buffer 2D indices
 // ----------------------------------------------------------------------------
@@ -132,7 +135,6 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double *Sf, int
     int j = blockDim.x * blockIdx.x + threadIdx.x;
     if(pid == 0){
         if (i > 0 && j > 0 && i < r && j < c - 1){
-            int t = i * c + j;
             BUF_SET(Sf, r, c, 0, i, j, 0.0);
             BUF_SET(Sf, r, c, 1, i, j, 0.0);
             BUF_SET(Sf, r, c, 2, i, j, 0.0);
@@ -140,7 +142,6 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double *Sf, int
         }
     }else if(pid == np -1){
         if (j > 0 && i < r-1 && j < c - 1){
-            int t = i * c + j;
             BUF_SET(Sf, r, c, 0, i, j, 0.0);
             BUF_SET(Sf, r, c, 1, i, j, 0.0);
             BUF_SET(Sf, r, c, 2, i, j, 0.0);
@@ -149,11 +150,27 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double *Sf, int
     }
 }
 
-__global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
-    int i = blockDim.y * blockIdx.y + threadIdx.y;
-    int j = blockDim.x * blockIdx.x + threadIdx.x;
-    int min_index, max_index;
-    if (i > 0 && j > 0 && i < r - 1 && j < c - 1){
+__global__ void sciddicaTFlowsComputation(int r, int c, int TILE_SIZE, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+    //determining row and col indexes that each thread has to compute
+    int i = TILE_SIZE * blockIdx.y + threadIdx.y;
+    int j = TILE_SIZE * blockIdx.x + threadIdx.x;
+    const int dim_buffers =  TILE_SIZE + NEIGHBOURHOOD_WIDTH -1;
+    //declaring buffers in shared memory 
+    __shared__ double Sz_shared[dim_buffers * dim_buffers];
+    __shared__ double Sh_shared[dim_buffers * dim_buffers];
+    //determining the indexes of the element that each thread has to load in shared memory
+    int i_halo = i - NEIGHBOURHOOD_WIDTH/2;
+    int j_halo = j - NEIGHBOURHOOD_WIDTH/2;
+    if(i_halo >= 0 && i_halo < r && j_halo >= 0 && j_halo < c){
+        Sz_shared[threadIdx.y * dim_buffers + threadIdx.x] = Sz[i_halo * c + j_halo];
+        Sh_shared[threadIdx.y * dim_buffers + threadIdx.x] = Sh[i_halo * c + j_halo];
+    }
+    else{
+        //ghost cells are not needed since boundaries are not computed
+    }
+    __syncthreads();
+
+    if(i > 0 && i < r -1 && j > 0 && j < c -1 &&  threadIdx.y < TILE_SIZE && threadIdx.x < TILE_SIZE){
         bool eliminated_cells[5] = {false, false, false, false, false};
         bool again;
         int cells_count;
@@ -162,19 +179,19 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
         double u[5];
         int n;
         double z, h;
-        m = GET(Sh, c, i, j) - p_epsilon;
-        u[0] = GET(Sz, c, i, j) + p_epsilon;
-        z = GET(Sz, c, i + Xi[1], j + Xj[1]);
-        h = GET(Sh, c, i + Xi[1], j + Xj[1]);
-        u[1] = z + h;
-        z = GET(Sz, c, i + Xi[2], j + Xj[2]);
-        h = GET(Sh, c, i + Xi[2], j + Xj[2]);
-        u[2] = z + h;
-        z = GET(Sz, c, i + Xi[3], j + Xj[3]);
-        h = GET(Sh, c, i + Xi[3], j + Xj[3]);
-        u[3] = z + h;
-        z = GET(Sz, c, i + Xi[4], j + Xj[4]);
-        h = GET(Sh, c, i + Xi[4], j + Xj[4]);
+        m = GET(Sh_shared, dim_buffers, 1 + threadIdx.y, 1 + threadIdx.x) - p_epsilon;
+        u[0] = GET(Sz_shared, dim_buffers, 1 + threadIdx.y, 1 + threadIdx.x) + p_epsilon;
+        z = GET(Sz_shared, dim_buffers, 1 + threadIdx.y + Xi[1], 1 + threadIdx.x + Xj[1]);
+        h = GET(Sh_shared, dim_buffers, 1 + threadIdx.y + Xi[1], 1 + threadIdx.x + Xj[1]);
+        u[1] = z + h;                                         
+        z = GET(Sz_shared, dim_buffers, 1 + threadIdx.y + Xi[2], 1 + threadIdx.x + Xj[2]);
+        h = GET(Sh_shared, dim_buffers, 1 + threadIdx.y + Xi[2], 1 + threadIdx.x + Xj[2]);
+        u[2] = z + h;                                         
+        z = GET(Sz_shared, dim_buffers, 1 + threadIdx.y + Xi[3], 1 + threadIdx.x + Xj[3]);
+        h = GET(Sh_shared, dim_buffers, 1 + threadIdx.y + Xi[3], 1 + threadIdx.x + Xj[3]);
+        u[3] = z + h;                                         
+        z = GET(Sz_shared, dim_buffers, 1 + threadIdx.y + Xi[4], 1 + threadIdx.x + Xj[4]);
+        h = GET(Sh_shared, dim_buffers, 1 + threadIdx.y + Xi[4], 1 + threadIdx.x + Xj[4]);
         u[4] = z + h;
 
         do{
@@ -197,16 +214,12 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
                     eliminated_cells[n] = true;
                     again = true;
                 }
-        } while (again);
+        }while(again);
 
-        if (!eliminated_cells[1])
-            BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
-        if (!eliminated_cells[2])
-            BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
-        if (!eliminated_cells[3])
-            BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
-        if (!eliminated_cells[4])
-            BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
+        if (!eliminated_cells[1]) BUF_SET(Sf, r, c, 0, i, j, (average - u[1]) * p_r);
+        if (!eliminated_cells[2]) BUF_SET(Sf, r, c, 1, i, j, (average - u[2]) * p_r);
+        if (!eliminated_cells[3]) BUF_SET(Sf, r, c, 2, i, j, (average - u[3]) * p_r);
+        if (!eliminated_cells[4]) BUF_SET(Sf, r, c, 3, i, j, (average - u[4]) * p_r);
     }
 }
 
@@ -219,7 +232,6 @@ __global__ void sciddicaTFlowsComputationHalos(int r, int c, double nodata, doub
         i = r -1;
     }
     int j = blockDim.x * blockIdx.x + threadIdx.x;
-    int min_index, max_index;
     if (j > 0 && j < c - 1){
         bool eliminated_cells[5] = {false, false, false, false, false};
         bool again;
@@ -342,6 +354,7 @@ __global__ void sciddicaTWidthUpdateHalos(int r, int c, double nodata, double *S
 // ----------------------------------------------------------------------------
 int main(int argc, char **argv){
     MPI_Init(&argc, &argv);
+
     // ----------------------------------------------------------------------------
     // I/O parameters used to index argv[]
     // ----------------------------------------------------------------------------
@@ -350,9 +363,7 @@ int main(int argc, char **argv){
     #define SOURCE_PATH_ID 3
     #define OUTPUT_PATH_ID 4
     #define STEPS_ID 5
-    #define BLOCK_X 6
-    #define BLOCK_Y 7
-
+    #define TILE_SIZE_IDX 6
     // ----------------------------------------------------------------------------
     // Simulation parameters
     // ----------------------------------------------------------------------------
@@ -372,9 +383,6 @@ int main(int argc, char **argv){
     int r = rows; // r: grid rows
     int c = cols; // c: grid columns
     int chunk;
-    int i_start, i_end;
-    // considering a ONLY a 1D partition of the domain
-    int j_start = 0, j_end = cols;
     int number_of_rows_to_compute;
 
     // number of bytes of the data that each process has to compute
@@ -383,21 +391,17 @@ int main(int argc, char **argv){
     if (pid == np - 1){
         // last processor must get all the remaining rows
         chunk = (rows*cols) / np + (rows*cols) % np;
-        i_end = rows - 1;
         number_of_bytes_to_compute = chunk * sizeof(double);
 
     }
     else{
         chunk = (rows*cols) / np;
-        i_end = (pid + 1) * chunk - 1;
         number_of_bytes_to_compute = chunk * sizeof(double);
     }
 
     number_of_rows_to_compute = ceil(float(chunk) / float(c));
-    i_start = pid * chunk;
     double *Sz; // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *Sh; // Sh: substate (grid) containing the cells' flow thickness
-    double *Sf; // Sf: 4 substates containing the flows towards the 4 neighs
 
     double p_r = P_R;                 // p_r: minimization algorithm outflows dumping factor
     double p_epsilon = P_EPSILON;     // p_epsilon: frictional parameter threshold
@@ -436,7 +440,7 @@ int main(int argc, char **argv){
     // int *d_Xi;
     // int *d_Xj;
 
-    int cuda_error = cudaSetDevice(pid);
+    int cuda_error = cudaSetDevice(1);
     if(cuda_error != cudaSuccess){
         printf("%d\n", cuda_error);
         return 1;
@@ -466,13 +470,15 @@ int main(int argc, char **argv){
         cudaHostAlloc((void **)&d_Sf_bottom_halo, number_of_halo_bytes, cudaHostAllocDefault);
     }
     // compute number of blocks given a fixed dimension for the block
-    int block_x = atoi(argv[BLOCK_X]), block_y = atoi(argv[BLOCK_X]);
-    dim3 blockDimension(block_x, block_y);
-    dim3 numBlocks(ceil(float(cols) / float(block_x)), ceil((float(number_of_rows_to_compute)) / float(block_x)));
+    int TILE_SIZE = atoi(argv[TILE_SIZE_IDX]);
+    dim3 blockDimension(32, 32);
+    dim3 numBlocks(ceil(float(cols) / 32.0), ceil((float(number_of_rows_to_compute)) / 32.0));
 
     dim3 blockDimensionHalo(32);
     dim3 numBlocksHalo(ceil(float(cols) / 32.0));
 
+    dim3 blockDimensionFlowsComputation(TILE_SIZE+NEIGHBOURHOOD_WIDTH -1, TILE_SIZE + NEIGHBOURHOOD_WIDTH -1);
+    dim3 numBlocksFlowsComputation(ceil(float(cols) / float(TILE_SIZE)), ceil(float(number_of_rows_to_compute) / float(TILE_SIZE)));
     // each process here has already declared the data structures he needs and now
     // worker processed can receive their portion of data to compute and halos
     MPI_Status status;
@@ -511,7 +517,6 @@ int main(int argc, char **argv){
 
     //  simulation loop
     for (int s = 0; s < steps; ++s){
-
         // Apply the resetFlow kernel to the whole domain
         sciddicaTResetFlows<<<numBlocks, blockDimension>>>(number_of_rows_to_compute, c, nodata, d_Sf, pid, np);
         if(pid == 0){
@@ -532,7 +537,8 @@ int main(int argc, char **argv){
             MPI_Send(d_Sz, cols, MPI_DOUBLE, pid -1, 8, MPI_COMM_WORLD);
         }
         // Apply the FlowComputation kernel to the whole domain
-        sciddicaTFlowsComputation<<<numBlocks, blockDimension>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
+        sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
+
         if(pid != 0)
             sciddicaTFlowsComputationHalos<<<numBlocksHalo, blockDimensionHalo>>>(number_of_rows_to_compute, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon, d_Sh_top_halo, d_Sz_top_halo, d_Sf_top_halo, true);
         if(pid != np -1)

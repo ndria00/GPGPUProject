@@ -13,14 +13,15 @@ else
 	HDR=../data/tessina_header.txt
 	DEM=../data/tessina_dem.txt
 	SRC=../data/tessina_source.txt
-	OUT=./tessina_output
+	OUT=./tessina_output_serial
 	STEPS=4000
 endif
 
 # definisce le macro contenenti i nomei degli eseguibili
 # e il numero di thread omp per la versione parallela
 NT = 2 # numero di threads OpenMP
-EXEC = sciddicaTTiledWithoutHalo
+EXEC = sciddicaTMPI
+MPI_RUN = mpirun -np 2
 TILE_SIZE = 16
 # definisce il target di default, utile in
 # caso di invocazione di make senza parametri
@@ -28,11 +29,11 @@ default:all
 
 # compila le versioni seriale e OpenMP
 all:
-	$(CPPC) sciddicaT.cu -o $(EXEC) -O3
+	$(CPPC) -L/usr/lib/openmpi/ -lmpi sciddicaT.cu -o $(EXEC) -O3
 
-# esegue la simulazione
+# esegue la simulazione 
 run:
-	./$(EXEC) $(HDR) $(DEM) $(SRC) $(OUT) $(STEPS) $(TILE_SIZE) &&  md5sum $(OUT) && cat $(HDR) $(OUT) > $(OUT).qgis && rm $(OUT)
+	$(MPI_RUN) ./$(EXEC) $(HDR) $(DEM) $(SRC) $(OUT) $(STEPS) $(TILE_SIZE) &&  md5sum $(OUT) && cat $(HDR) $(OUT) > $(OUT).qgis && rm $(OUT)
 
 # elimina l'eseguibile, file oggetto e file di output
 clean:

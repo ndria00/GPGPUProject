@@ -21,6 +21,7 @@ endif
 # e il numero di thread omp per la versione parallela
 NT = 2 # numero di threads OpenMP
 EXEC = sciddicaTTiled
+TILE_SIZE = 16
 
 # definisce il target di default, utile in
 # caso di invocazione di make senza parametri
@@ -32,7 +33,7 @@ all:
 
 # esegue la simulazione
 run:
-	./$(EXEC) $(HDR) $(DEM) $(SRC) $(OUT) $(STEPS) &&  md5sum $(OUT) && cat $(HDR) $(OUT) > $(OUT).qgis && rm $(OUT)
+	./$(EXEC) $(HDR) $(DEM) $(SRC) $(OUT) $(STEPS) $(TILE_SIZE) &&  md5sum $(OUT) && cat $(HDR) $(OUT) > $(OUT).qgis && rm $(OUT)
 
 # elimina l'eseguibile, file oggetto e file di output
 clean:

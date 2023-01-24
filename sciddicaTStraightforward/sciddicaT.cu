@@ -13,6 +13,8 @@
 #define SOURCE_PATH_ID 3
 #define OUTPUT_PATH_ID 4
 #define STEPS_ID 5
+#define BLOCK_X 6
+#define BLOCK_Y 7
 // ----------------------------------------------------------------------------
 // Simulation parameters
 // ----------------------------------------------------------------------------
@@ -210,8 +212,6 @@ int main(int argc, char **argv){
 
     int r = rows;                  // r: grid rows
     int c = cols;                  // c: grid columns
-    int i_start = 1, i_end = r-1;  // [i_start,i_end[: kernels application range along the rows
-    int j_start = 1, j_end = c-1;  // [i_start,i_end[: kernels application range along the rows
     double *Sz;                    // Sz: substate (grid) containing the cells' altitude a.s.l.
     double *Sh;                    // Sh: substate (grid) containing the cells' flow thickness
     double *Sf;                    // Sf: 4 substates containing the flows towards the 4 neighs
@@ -257,8 +257,9 @@ int main(int argc, char **argv){
     cudaMalloc((void**) &d_Xj, (ADJACENT_CELLS + 1) * sizeof(int));
 
     //compute number of blocks given a fixed dimension for the block
-    dim3 blockDimension(32, 32);
-    dim3 numBlocks(ceil(float(cols) / 32.0), ceil(float(rows) / 32.0));
+    int block_x = atoi(argv[BLOCK_X]), block_y =atoi(argv[BLOCK_Y]);
+    dim3 blockDimension(block_x, block_y);
+    dim3 numBlocks(ceil(float(cols) / float(block_x)), ceil(float(rows) / float(block_y)));
     //copy data to the device
     cudaMemcpy(d_Sz, Sz, numberOfBytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_Sh, Sh, numberOfBytes, cudaMemcpyHostToDevice);

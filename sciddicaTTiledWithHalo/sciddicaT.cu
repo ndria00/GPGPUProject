@@ -6,21 +6,8 @@
 #include "util.hpp"
 
 // ----------------------------------------------------------------------------
-// I/O parameters used to index argv[]
-// ----------------------------------------------------------------------------
-#define HEADER_PATH_ID 1
-#define DEM_PATH_ID 2
-#define SOURCE_PATH_ID 3
-#define OUTPUT_PATH_ID 4
-#define STEPS_ID 5
-// ----------------------------------------------------------------------------
 // Simulation parameters
 // ----------------------------------------------------------------------------
-#define P_R 0.5
-#define P_EPSILON 0.001
-#define ADJACENT_CELLS 4
-#define STRLEN 256
-#define TILE_SIZE 16
 #define NEIGHBOURHOOD_WIDTH 3
 
 // ----------------------------------------------------------------------------
@@ -40,6 +27,7 @@ __constant__ int Xj[] = {0,  0, -1,  1,  0};// Xj: von Neuman neighborhood col c
 // I/O functions
 // ----------------------------------------------------------------------------
 void readHeaderInfo(char* path, int &nrows, int &ncols, /*double &xllcorner, double &yllcorner, double &cellsize,*/ double &nodata){
+    #define STRLEN 256
     FILE* f;
   
     if ( (f = fopen(path,"r") ) == 0){
@@ -58,6 +46,7 @@ void readHeaderInfo(char* path, int &nrows, int &ncols, /*double &xllcorner, dou
 }
 
 bool loadGrid2D(double *M, int rows, int columns, char *path){
+    #define STRLEN 256
     FILE *f = fopen(path, "r");
 
     if(!f) {
@@ -78,6 +67,7 @@ bool loadGrid2D(double *M, int rows, int columns, char *path){
 }
 
 bool saveGrid2Dr(double *M, int rows, int columns, char *path){
+    #define STRLEN 256
     FILE *f;
     f = fopen(path, "w");
     if(!f)
@@ -136,7 +126,7 @@ __global__ void sciddicaTResetFlows(int r, int c, double nodata, double* Sf){
     }
 }
 
-__global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
+__global__ void sciddicaTFlowsComputation(int r, int c, int TILE_SIZE, double *Sz, double *Sh, double *Sf, double p_r, double p_epsilon){
     //determining row and col indexes that each thread has to compute
     int i = TILE_SIZE * blockIdx.y + threadIdx.y;
     int j = TILE_SIZE * blockIdx.x + threadIdx.x;
@@ -209,7 +199,7 @@ __global__ void sciddicaTFlowsComputation(int r, int c, double nodata, double *S
     }
 }
 
-__global__ void sciddicaTWidthUpdate(int r, int c, double nodata, double *Sz, double *Sh, double *Sf){
+__global__ void sciddicaTWidthUpdate(int r, int c, int TILE_SIZE, double *Sz, double *Sh, double *Sf){
     int i = blockDim.y * blockIdx.y + threadIdx.y;
     int j = blockDim.x * blockIdx.x + threadIdx.x;
     if(i > 0 && j > 0 && i < r-1 && j < c-1){
@@ -228,6 +218,25 @@ __global__ void sciddicaTWidthUpdate(int r, int c, double nodata, double *Sz, do
 // Function main()
 // ----------------------------------------------------------------------------
 int main(int argc, char **argv){
+    //declaring constants in the main so that kernel threads will not have them in their memory
+    // ----------------------------------------------------------------------------
+    // I/O parameters used to index argv[]
+    // ----------------------------------------------------------------------------
+    #define HEADER_PATH_ID 1
+    #define DEM_PATH_ID 2
+    #define SOURCE_PATH_ID 3
+    #define OUTPUT_PATH_ID 4
+    #define STEPS_ID 5
+    #define TILE_SIZE_IDX  6
+    // ----------------------------------------------------------------------------
+    // Simulation parameters
+    // ----------------------------------------------------------------------------
+    #define P_R 0.5
+    #define P_EPSILON 0.001
+    #define ADJACENT_CELLS 4
+    
+    int TILE_SIZE = atoi(argv[TILE_SIZE_IDX]);
+
     int rows, cols;
     double nodata;
     readHeaderInfo(argv[HEADER_PATH_ID], rows, cols, nodata);
@@ -279,6 +288,7 @@ int main(int argc, char **argv){
     //compute number of blocks given a fixed dimension for the block
     dim3 blockDimensionFlowsComputation(TILE_SIZE+NEIGHBOURHOOD_WIDTH -1, TILE_SIZE + NEIGHBOURHOOD_WIDTH -1);
     dim3 numBlocksFlowsComputation(ceil(float(cols) / float(TILE_SIZE)), ceil(float(rows) / float(TILE_SIZE)));
+    
     dim3 blockDimension(32, 32);
     dim3 numBlocks(ceil(float(cols) / 32.0), ceil(float(rows) / 32.0));
     //copy data to the device
@@ -293,11 +303,11 @@ int main(int argc, char **argv){
     for (int s = 0; s < steps; ++s){
         // Apply the resetFlow kernel to the whole domain
         int error;
-        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sf);
+        sciddicaTResetFlows<<<numBlocks, blockDimension>>>(r, c, TILE_SIZE, d_Sf);
         // Apply the FlowComputation kernel to the whole domain
-        sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation>>>(r, c, nodata, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
+        sciddicaTFlowsComputation<<<numBlocksFlowsComputation, blockDimensionFlowsComputation>>>(r, c, TILE_SIZE, d_Sz, d_Sh, d_Sf, p_r, p_epsilon);
         // Apply the WidthUpdate mass balance kernel to the whole domain
-        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, nodata, d_Sz, d_Sh, d_Sf);
+        sciddicaTWidthUpdate<<<numBlocks, blockDimension>>>(r, c, TILE_SIZE, d_Sz, d_Sh, d_Sf);
     }
     //copy data back to the host
     cudaMemcpy(Sz, d_Sz, numberOfBytes, cudaMemcpyDeviceToHost);
